@@ -78,3 +78,6 @@ htmlcov/
 # =========================
 secrets.json
 credentials.json
+
+agent.log
+runbook/agent.log

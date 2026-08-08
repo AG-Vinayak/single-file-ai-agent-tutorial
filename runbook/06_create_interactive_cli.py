@@ -13,7 +13,7 @@ import argparse  # NEW
 import logging
 from typing import List, Dict, Any
 from dotenv import load_dotenv
-from google.genai.types import GenerateContentConfig
+from google.genai import types
 from google import genai
 from pydantic import BaseModel
 
@@ -92,67 +92,150 @@ class AIAgent:
         except Exception as e:
             return f"Error editing file: {str(e)}"
 
-    def chat(self, user_input: str) -> str:
+    def _execute_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
         """
-        Send a message to Gemini and return its response.
+        Execute one of the available tools.
         """
 
-        # Store the user's message
+        try:
+            if tool_name == "_read_file":
+                return self._read_file(tool_input["path"])
+
+            elif tool_name == "_list_files":
+                return self._list_files(tool_input.get("path", "."))
+
+            elif tool_name == "_edit_file":
+                return self._edit_file(
+                    tool_input["path"],
+                    tool_input.get("old_text", ""),
+                    tool_input["new_text"],
+                )
+
+            return f"Unknown tool: {tool_name}"
+
+        except Exception as e:
+            return str(e)
+
+    def chat(self, user_input: str) -> str:
         self.messages.append(
             {
                 "role": "user",
                 "content": user_input,
             }
         )
+        """
+        Chat with Gemini using manual function calling.
+        """
 
-        # Build conversation history into a prompt
-        prompt = ""
+        contents = []
 
         for msg in self.messages:
-            prompt += f"{msg['role'].upper()}: {msg['content']}\n"
+            contents.append(
+                types.Content(
+                    role=msg["role"],
+                    parts=[
+                        types.Part.from_text(text=msg["content"]),
+                    ],
+                )
+            )
 
-        try:
+        while True:
             response = self.client.models.generate_content(
                 model="gemini-3.5-flash",
-                contents=prompt,
-                config=GenerateContentConfig(
-                    tools=[
-                        self._read_file,
-                        self._list_files,
-                        self._edit_file,
-                    ]
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    tools=self._build_tools(),
                 ),
             )
 
-            # Check if Gemini wants to call a function
-            if (
-                response.candidates
-                and response.candidates[0].content.parts
-                and hasattr(response.candidates[0].content.parts[0], "function_call")
-                and response.candidates[0].content.parts[0].function_call
-            ):
-                function_call = response.candidates[0].content.parts[0].function_call
+            # No function call -> final answer
+            if not response.function_calls:
+                assistant_reply = response.text
 
-                function_name = function_call.name
-                function_args = dict(function_call.args)
+                self.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": assistant_reply,
+                    }
+                )
 
-                result = self._execute_tool(function_name, function_args)
+                return assistant_reply
 
-                return result
+            # Execute every requested function
+            function_response_parts = []
 
-            assistant_reply = response.text
+            for function_call in response.function_calls:
+                tool_result = self._execute_tool(
+                    function_call.name,
+                    dict(function_call.args),
+                )
 
-            self.messages.append(
-                {
-                    "role": "assistant",
-                    "content": assistant_reply,
-                }
+                function_response_parts.append(
+                    types.Part.from_function_response(
+                        name=function_call.name,
+                        response={
+                            "result": tool_result,
+                        },
+                    )
+                )
+
+            # Add model function call
+            contents.append(response.candidates[0].content)
+
+            # Add tool response
+            contents.append(
+                types.Content(
+                    role="user",
+                    parts=function_response_parts,
+                )
             )
 
-            return assistant_reply
+    def _build_tools(self):
 
-        except Exception as e:
-            return f"Error: {str(e)}"
+        return [
+            types.Tool(
+                function_declarations=[
+                    types.FunctionDeclaration(
+                        name="_read_file",
+                        description="Read a file.",
+                        parameters_json_schema={
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "type": "string",
+                                }
+                            },
+                            "required": ["path"],
+                        },
+                    ),
+                    types.FunctionDeclaration(
+                        name="_list_files",
+                        description="List files in a directory.",
+                        parameters_json_schema={
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "type": "string",
+                                }
+                            },
+                        },
+                    ),
+                    types.FunctionDeclaration(
+                        name="_edit_file",
+                        description="Edit a file.",
+                        parameters_json_schema={
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "old_text": {"type": "string"},
+                                "new_text": {"type": "string"},
+                            },
+                            "required": ["path", "new_text"],
+                        },
+                    ),
+                ]
+            )
+        ]
 
 
 def main():
@@ -207,7 +290,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
 # ```bash
 # export GEMINI_API_KEY="your-api-key-here"
