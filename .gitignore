@@ -81,3 +81,9 @@ credentials.json
 
 agent.log
 runbook/agent.log
+
+.venv/
+.env
+__pycache__/
+*.pyc
+agent.log
